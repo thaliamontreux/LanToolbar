@@ -1,0 +1,310 @@
+Awesome — Node.js + PostgreSQL on Ubuntu 24.04 is a clean, “boring in a good way” stack for LAN chat.
+
+Below is a concrete project plan you can implement immediately: architecture, DB schema, API + WebSocket protocol, folder layout, and Ubuntu deployment.
+
+---
+
+## 1) High-level architecture
+
+**Clients (Windsurf apps)** talk to one server:
+
+* **REST API**: login, user list, conversation list, history fetch, message send (optional)
+* **WebSocket**: realtime delivery, presence, typing, read receipts
+
+**Server components**
+
+* Node.js app (Fastify or NestJS)
+* PostgreSQL (messages + users + conversations)
+* Optional later: Redis (presence scaling, multi-instance), but you can skip for v1
+
+---
+
+## 2) Core product requirements (v1)
+
+### Must-have
+
+* Users can **log in** (username + password)
+* Users can **send 1:1 messages**
+* Users can **receive messages instantly when online**
+* Users can **fetch missed messages** after reconnect
+* **Read receipts** optional but easy
+* **Presence** (online/offline) basic
+
+### Nice-to-have (v1.1)
+
+* Group chats
+* Typing indicators
+* Admin UI for user management
+
+---
+
+## 3) Data model (PostgreSQL schema)
+
+This supports **1:1 conversations** and is easily extended to groups later.
+
+```sql
+-- Users
+CREATE TABLE users (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  username     TEXT UNIQUE NOT NULL,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role         TEXT NOT NULL DEFAULT 'user', -- 'admin'|'user'
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at TIMESTAMPTZ
+);
+
+-- 1:1 conversations (unique pair)
+CREATE TABLE conversations (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type        TEXT NOT NULL DEFAULT 'dm', -- future: 'group'
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Participants (2 rows for a DM)
+CREATE TABLE conversation_participants (
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  joined_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_read_message_id UUID, -- for read receipts
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+-- Enforce “one DM per pair” by storing a canonical pair key:
+CREATE TABLE dm_pairs (
+  user_low  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_high UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_low, user_high),
+  UNIQUE (conversation_id)
+);
+
+-- Messages
+CREATE TABLE messages (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body            TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_messages_conversation_created ON messages(conversation_id, created_at);
+```
+
+**How DMs work**
+
+* When user A messages user B:
+
+  * server finds/creates DM conversation using `dm_pairs` (store `min(user_id)` and `max(user_id)` as `(low, high)`)
+  * insert message
+  * push via WebSocket to recipient if online
+
+---
+
+## 4) Auth model (LAN-safe)
+
+Even on LAN, use TLS and tokens.
+
+* `POST /auth/login` → returns **JWT access token** (e.g. 15–60 min)
+* (Optional) refresh token if you want long sessions
+* WebSocket connects with token:
+
+  * `wss://chat.lan/ws` and send `{type:"auth", token:"..."}` as first message
+  * (don’t put token in query string unless you must)
+
+Password hashing: **argon2** (recommended) or bcrypt.
+
+---
+
+## 5) API endpoints (REST)
+
+### Auth
+
+* `POST /auth/login` → `{ token, user }`
+* `POST /auth/logout` (optional; mostly client-side)
+
+### Users
+
+* `GET /users/me`
+* `GET /users` (list active users; for “start chat with…”)
+* `POST /users` (admin only; create user)
+* `PATCH /users/:id` (admin; deactivate/reset)
+
+### Conversations
+
+* `GET /conversations` (list user conversations + last message)
+* `POST /conversations/dm` with `{ userId }` (get-or-create DM)
+
+### Messages
+
+* `GET /conversations/:id/messages?limit=50&before=<timestamp|messageId>`
+* `POST /conversations/:id/messages` with `{ body }` (optional if you prefer “send over WS only”)
+* `POST /conversations/:id/read` with `{ lastReadMessageId }`
+
+**Recommendation:** allow sending via **WebSocket** for realtime + also offer REST for fallback/testing.
+
+---
+
+## 6) WebSocket protocol (simple JSON events)
+
+### Client → Server
+
+```json
+{ "type": "auth", "token": "JWT_HERE" }
+{ "type": "message.send", "toUserId": "uuid", "body": "hello" }
+{ "type": "message.read", "conversationId": "uuid", "lastReadMessageId": "uuid" }
+{ "type": "typing", "conversationId": "uuid", "isTyping": true }
+{ "type": "ping", "t": 123 }
+```
+
+### Server → Client
+
+```json
+{ "type": "auth.ok", "user": { ... } }
+{ "type": "auth.error", "message": "invalid token" }
+
+{ "type": "message.new",
+  "message": { "id":"...", "conversationId":"...", "senderId":"...", "body":"...", "createdAt":"..." }
+}
+
+{ "type": "presence",
+  "userId":"...", "status":"online" }   // or "offline"
+
+{ "type": "typing",
+  "conversationId":"...", "userId":"...", "isTyping": true }
+
+{ "type": "message.read",
+  "conversationId":"...", "userId":"...", "lastReadMessageId":"..." }
+```
+
+**Delivery guarantee (v1):**
+
+* Persist every message in Postgres first
+* Then attempt WS push
+* Client always fetches missed messages on reconnect (`GET /conversations/:id/messages?after=...` or by timestamp)
+
+---
+
+## 7) Node project layout
+
+If you want “fast to ship” with clean structure: **Fastify + TypeScript**.
+
+```
+chat-server/
+  src/
+    app.ts
+    config/
+      env.ts
+    db/
+      index.ts
+      migrations/
+    auth/
+      jwt.ts
+      middleware.ts
+    users/
+      users.routes.ts
+      users.service.ts
+    conversations/
+      conv.routes.ts
+      conv.service.ts
+    messages/
+      msg.routes.ts
+      msg.service.ts
+    realtime/
+      ws.ts
+      presence.ts
+  package.json
+  tsconfig.json
+  docker-compose.yml (optional)
+```
+
+---
+
+## 8) Deployment on Ubuntu 24.04 (recommended)
+
+### DNS / hostnames
+
+Pick a stable LAN name, e.g.:
+
+* `chat.lan` or `chat.internal`
+
+Add it to:
+
+* your internal DNS, or
+* each client’s hosts file, or
+* router DNS entries
+
+### TLS
+
+Best on LAN:
+
+* generate an internal CA
+* install CA cert on all client machines
+* issue `chat.lan` server cert
+
+### Reverse proxy (Nginx)
+
+Nginx terminates TLS and proxies:
+
+* `/api` → Node (localhost:3000)
+* `/ws` → Node (localhost:3000) with WebSocket upgrade
+
+### systemd service (no Docker)
+
+Run Node as a service:
+
+* `chat-server.service` with restart always
+* environment file for secrets
+
+### Postgres
+
+* local Postgres on same server is fine for LAN
+* ensure backups (`pg_dump` nightly)
+
+---
+
+## 9) Security checklist (LAN-appropriate)
+
+* TLS always (prevents sniffing credentials/tokens)
+* Argon2 password hashes
+* Disable inactive users
+* Rate-limit login attempts
+* Audit log table (optional): login events, admin actions
+* Server-side input validation (message size limits, etc.)
+
+---
+
+## 10) Implementation plan (what we build first)
+
+**Milestone 1: Foundations**
+
+* Project scaffolding (TS, Fastify, env config)
+* Postgres connection + migrations
+* Users table + admin seed user
+* Login endpoint + JWT
+
+**Milestone 2: DMs + history**
+
+* DM get-or-create (`dm_pairs`)
+* Insert messages
+* Fetch message history
+
+Milestone 3: Realtime
+
+WS auth
+
+Track online users (in-memory map)
+
+Push message.new to recipient if online
+
+Presence broadcast
+
+Milestone 4: UX features
+
+Read receipts
+
+Typing indicators
+
+Conversation list with last message
+
