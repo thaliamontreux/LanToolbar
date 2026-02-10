@@ -2,7 +2,7 @@
 
 ## Assumptions
 
-- Hostname: `chat.lan`
+- Hostname: `chatterbox.pentastarstudios.com`
 - Node server listens on `127.0.0.1:3000`
 - Nginx terminates TLS and proxies:
   - `/api/*` -> Node
@@ -117,9 +117,9 @@ sudo systemctl reload nginx
 
 ## 9) Endpoints
 
-- REST base: `https://chat.lan/api/...`
-- WebSocket: `wss://chat.lan/ws`
+- REST base: `https://chatterbox.pentastarstudios.com:90/api/...`
+- WebSocket: `wss://chatterbox.pentastarstudios.com:90/ws`
 
 Example login:
 
-`POST https://chat.lan/api/auth/login`
+`POST https://chatterbox.pentastarstudios.com:90/api/auth/login`

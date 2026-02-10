@@ -12,7 +12,8 @@ sudo bash install_ubuntu_24_04.sh
 
 Optional environment variables:
 
-- `DOMAIN` (default: `chat.lan`)
+- `DOMAIN` (default: `chatterbox.pentastarstudios.com`)
+- `PUBLIC_PORT` (default: `90`)
 - `REPO_URL` (default: `git@github.com:thaliamontreux/LanToolbar.git`)
 - `DB_NAME` (default: `lan_chat`)
 - `DB_USER` (default: `lan_chat`)

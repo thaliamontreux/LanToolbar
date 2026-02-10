@@ -6,7 +6,8 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   exit 1
 fi
 
-DOMAIN="${DOMAIN:-chat.lan}"
+DOMAIN="${DOMAIN:-chatterbox.pentastarstudios.com}"
+PUBLIC_PORT="${PUBLIC_PORT:-90}"
 REPO_URL="${REPO_URL:-git@github.com:thaliamontreux/LanToolbar.git}"
 APP_DIR="${APP_DIR:-/opt/lan-chat}"
 CHAT_DIR="$APP_DIR/chat-server"
@@ -124,7 +125,11 @@ if [[ "$SELF_SIGNED_TLS" == "1" ]]; then
 fi
 
 NGINX_TMP="/etc/nginx/sites-available/lan-chat"
-sed "s/server_name chat.lan;/server_name ${DOMAIN};/g; s#/etc/ssl/certs/chat.lan.crt#${TLS_CERT}#g; s#/etc/ssl/private/chat.lan.key#${TLS_KEY}#g" \
+sed -E \
+  -e "s/server_name [^;]+;/server_name ${DOMAIN};/g" \
+  -e "s/listen [0-9]+( ssl)?;/listen ${PUBLIC_PORT} ssl;/g" \
+  -e "s#/etc/ssl/certs/[^ ]+\.crt#${TLS_CERT}#g" \
+  -e "s#/etc/ssl/private/[^ ]+\.key#${TLS_KEY}#g" \
   "$CHAT_DIR/deploy/nginx-lan-chat.conf" > "$NGINX_TMP"
 
 ln -sf /etc/nginx/sites-available/lan-chat /etc/nginx/sites-enabled/lan-chat
